@@ -1,0 +1,324 @@
+---
+title: "Hot reload config trên Kubernetes với Go và ConfigMap"
+description: "Kubelet cập nhật file ConfigMap trong pod như thế nào, vì sao watch thẳng vào file thì hỏng, và cách viết một config store hot reload an toàn bằng Go."
+pubDatetime: 2026-11-17T00:00:00+07:00
+tags:
+  - kubernetes
+  - go
+  - configmap
+featured: false
+draft: false
+---
+
+Đổi log level từ `info` sang `debug` lúc đang điều tra sự cố mà phải rollout lại cả Deployment thì vừa chậm vừa làm mất luôn hiện trường. Bài này đi qua cách để service Go tự nhận config mới khi ConfigMap thay đổi, không cần restart pod.
+
+Ý tưởng gồm ba bước: mount ConfigMap thành file, theo dõi thay đổi trên file đó, rồi nạp config mới vào bộ nhớ một cách an toàn. Bước hai là chỗ dễ sai nhất, nên phải hiểu kubelet làm gì trước.
+
+## Kubelet cập nhật file ConfigMap thế nào
+
+Khi mount ConfigMap thành volume, file bạn thấy trong pod không phải file thật mà là một chuỗi symlink:
+
+```bash
+$ kubectl exec deploy/app -- ls -la /etc/app
+drwxr-xr-x  ..2026_11_17_02_10_31.1204581623
+lrwxrwxrwx  ..data -> ..2026_11_17_02_10_31.1204581623
+lrwxrwxrwx  app.yaml -> ..data/app.yaml
+```
+
+File thật nằm trong thư mục có dấu thời gian. `app.yaml` trỏ vào `..data/app.yaml`, còn `..data` trỏ vào thư mục đó.
+
+Khi ConfigMap đổi, kubelet không ghi đè lên file cũ. Nó làm bốn việc:
+
+1. Tạo một thư mục dấu thời gian mới và ghi toàn bộ file mới vào đó.
+2. Tạo symlink tạm `..data_tmp` trỏ vào thư mục mới.
+3. `rename` `..data_tmp` thành `..data`.
+4. Xoá thư mục cũ.
+
+Bước 3 là một thao tác nguyên tử, nên ứng dụng không bao giờ đọc phải file đang ghi dở, và mọi file trong ConfigMap đổi cùng một lúc.
+
+Hệ quả cho việc theo dõi file: symlink `app.yaml` không hề thay đổi, và file thật mà nó trỏ tới lúc đầu thì bị xoá. Nếu đặt watch thẳng lên `app.yaml`, bạn nhận được một sự kiện xoá rồi watch chết theo file cũ, các lần cập nhật sau không còn tín hiệu nào. Cách đúng là **watch thư mục cha và chờ sự kiện tạo `..data`**.
+
+## Cập nhật không tức thời
+
+Kubelet không đẩy file ngay khi bạn `kubectl apply`. Độ trễ tối đa xấp xỉ:
+
+$$
+T_{\max} \approx T_{\text{sync}} + T_{\text{cache}}
+$$
+
+Trong đó $T_{\text{sync}}$ là chu kỳ đồng bộ của kubelet (`syncFrequency`, mặc định 1 phút) và $T_{\text{cache}}$ là độ trễ lan truyền của cache ConfigMap phía kubelet, phụ thuộc vào `configMapAndSecretChangeDetectionStrategy`. Thực tế thường thấy file đổi sau vài chục giây đến hơn một phút.
+
+Mỗi node đồng bộ theo nhịp riêng, nên trong khoảng đó **các pod chạy config khác nhau**. Config hot reload phải chịu được trạng thái lẫn lộn này.
+
+> [!WARNING] Ba trường hợp file không bao giờ được cập nhật
+> - Mount bằng `subPath`: container không nhận bản cập nhật của ConfigMap.
+> - Nạp ConfigMap qua biến môi trường (`envFrom`, `valueFrom`): giá trị chỉ được đọc lúc container khởi động.
+> - ConfigMap đặt `immutable: true`.
+
+## Manifest
+
+Mount cả thư mục, không dùng `subPath`:
+
+```yaml file=deployment.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  app.yaml: |
+    logLevel: info
+    rateLimitRPS: 100
+    features:
+      newCheckout: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: app }
+  template:
+    metadata:
+      labels: { app: app }
+    spec:
+      containers:
+        - name: app
+          image: registry.example.com/app:1.0.0
+          volumeMounts:
+            - name: config
+              mountPath: /etc/app # [!code highlight]
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: app-config
+```
+
+## Nạp và kiểm tra config
+
+Phần nạp config làm ba việc: đọc file, parse, kiểm tra hợp lệ. `KnownFields(true)` khiến một key gõ sai thành lỗi thay vì bị bỏ qua trong im lặng.
+
+```go file=config/config.go
+type Config struct {
+	LogLevel     string          `yaml:"logLevel"`
+	RateLimitRPS int             `yaml:"rateLimitRPS"`
+	Features     map[string]bool `yaml:"features"`
+}
+
+func (c *Config) Validate() error {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(c.LogLevel)); err != nil {
+		return fmt.Errorf("logLevel: %w", err)
+	}
+	if c.RateLimitRPS <= 0 {
+		return fmt.Errorf("rateLimitRPS must be > 0, got %d", c.RateLimitRPS)
+	}
+	return nil
+}
+
+func Load(path string) (*Config, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+
+	var cfg Config
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validate %s: %w", path, err)
+	}
+	return &cfg, nil
+}
+```
+
+## Store: đổi config bằng một phép gán con trỏ
+
+Request đang chạy không được thấy config ở trạng thái nửa cũ nửa mới. Cách đơn giản nhất là coi mỗi `Config` là bất biến và chỉ đổi con trỏ trỏ tới nó, dùng `atomic.Pointer`. Đọc config không cần lock.
+
+```go file=config/store.go
+type Store struct {
+	path     string
+	current  atomic.Pointer[Config]
+	OnChange func(old, new *Config)
+}
+
+func NewStore(path string) (*Store, error) {
+	cfg, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{path: path}
+	s.current.Store(cfg)
+	return s, nil
+}
+
+func (s *Store) Get() *Config { return s.current.Load() }
+
+func (s *Store) Reload() error {
+	cfg, err := Load(s.path)
+	if err != nil {
+		return err // [!code highlight]
+	}
+	old := s.current.Swap(cfg)
+	if s.OnChange != nil {
+		s.OnChange(old, cfg)
+	}
+	return nil
+}
+```
+
+Dòng được tô sáng là điểm quan trọng nhất của cả bài: **config mới mà lỗi thì giữ nguyên config cũ**. Một ConfigMap gõ sai không được phép làm sập service đang chạy tốt.
+
+Quy ước đi kèm: không ai được sửa một `Config` đã lấy ra từ `Get()`. Muốn đổi thì tạo bản mới.
+
+## Watch thư mục, không watch file
+
+```go file=config/watch.go
+func (s *Store) Watch(ctx context.Context, log *slog.Logger) error {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+
+	if err := w.Add(filepath.Dir(s.path)); err != nil { // [!code highlight]
+		return err
+	}
+
+	debounce := time.NewTimer(time.Hour)
+	debounce.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case ev, ok := <-w.Events:
+			if !ok {
+				return nil
+			}
+			name := filepath.Base(ev.Name)
+			if name != "..data" && name != filepath.Base(s.path) { // [!code highlight]
+				continue
+			}
+			if ev.Has(fsnotify.Create) || ev.Has(fsnotify.Write) {
+				debounce.Reset(200 * time.Millisecond)
+			}
+
+		case <-debounce.C:
+			if err := s.Reload(); err != nil {
+				log.Error("config reload failed, keeping previous config", "err", err)
+				continue
+			}
+			log.Info("config reloaded")
+
+		case err, ok := <-w.Errors:
+			if !ok {
+				return nil
+			}
+			log.Error("config watcher error", "err", err)
+		}
+	}
+}
+```
+
+Ba chi tiết đáng chú ý:
+
+- **Watch `filepath.Dir(s.path)`.** Thư mục mount tồn tại suốt đời pod, nên watch không bị mất khi kubelet đổi symlink.
+- **Lọc theo tên `..data`.** Phép `rename` ở bước 3 hiện ra trong `fsnotify` thành sự kiện `Create` trên `..data`. Điều kiện thứ hai (tên file config) là để hot reload vẫn chạy khi bạn sửa file trực tiếp trên máy dev, nơi không có symlink nào.
+- **Debounce 200 ms.** Một lần cập nhật sinh ra nhiều sự kiện liên tiếp (tạo thư mục, tạo symlink tạm, rename, xoá thư mục cũ). Gom lại để chỉ nạp một lần.
+
+## Dùng trong service
+
+```go file=main.go
+func main() {
+	var level slog.LevelVar
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &level}))
+
+	store, err := config.NewStore("/etc/app/app.yaml")
+	if err != nil {
+		logger.Error("load config", "err", err)
+		os.Exit(1)
+	}
+
+	apply := func(_, cfg *config.Config) {
+		_ = level.UnmarshalText([]byte(cfg.LogLevel))
+	}
+	apply(nil, store.Get())
+	store.OnChange = apply
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	go func() {
+		if err := store.Watch(ctx, logger); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("config watcher stopped", "err", err)
+		}
+	}()
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		cfg := store.Get() // [!code highlight]
+		if cfg.Features["newCheckout"] {
+			fmt.Fprintln(w, "new checkout flow")
+		}
+		fmt.Fprintf(w, "rate limit: %d rps\n", cfg.RateLimitRPS)
+	})
+
+	// ... khởi động http.Server và shutdown khi ctx kết thúc
+}
+```
+
+Có hai kiểu tiêu thụ config:
+
+- **Đọc mỗi lần dùng**, như feature flag hay rate limit. Gọi `store.Get()` **một lần ở đầu request** rồi dùng bản đó tới hết request. Gọi nhiều lần trong cùng một request có thể ra hai bản config khác nhau.
+- **Áp một lần khi đổi**, như log level. Việc này đặt trong `OnChange`. Ở đây `slog.LevelVar` cho phép đổi mức log của logger đang chạy.
+
+Lúc khởi động thì ngược với lúc reload: config lỗi phải làm process thoát ngay, vì không có bản cũ nào để giữ.
+
+## Thử nghiệm
+
+```bash
+kubectl patch configmap app-config --type merge \
+  -p '{"data":{"app.yaml":"logLevel: debug\nrateLimitRPS: 250\n"}}'
+
+kubectl logs -f deploy/app | grep config
+```
+
+Sau khoảng một phút sẽ thấy dòng `config reloaded`. Thử tiếp với `rateLimitRPS: -1`: log báo `config reload failed, keeping previous config` và service vẫn chạy với giá trị 250.
+
+Mình đã kiểm tra phần Go bằng một test mô phỏng đúng chuỗi thao tác của kubelet (thư mục dấu thời gian, `..data_tmp`, `rename`, xoá thư mục cũ) trên macOS, chạy với race detector: config hợp lệ được nạp, config sai giá trị và config có key lạ đều bị từ chối. Mình chưa chạy trên một cluster thật, nên con số độ trễ ở trên là theo tài liệu Kubernetes chứ không phải số đo.
+
+## Những chỗ dễ vấp
+
+**Không phải config nào cũng reload được.** Log level, feature flag, rate limit, timeout thì đổi lúc chạy được. Cổng lắng nghe, kích thước connection pool, địa chỉ database thì cần dựng lại tài nguyên; với nhóm này restart pod là lựa chọn đơn giản và an toàn hơn.
+
+**Hot reload đi vòng qua rolling update.** Rollout bình thường thay pod từng đợt, có readiness probe chặn bản lỗi và có `kubectl rollout undo`. Sửa ConfigMap tại chỗ thì mọi pod nhận config mới trong vòng một hai phút, không có bước nào dừng lại nếu config hợp lệ về cú pháp nhưng sai về nghiệp vụ. Vì vậy `Validate()` cần chặt, và những thay đổi rủi ro nên đi đường rollout.
+
+**Pod khởi động lại với config lỗi sẽ crash.** Pod đang chạy giữ được config cũ, nhưng pod mới (do scale hoặc node chết) đọc thẳng bản lỗi và rơi vào `CrashLoopBackOff`. Lỗi reload cần có cảnh báo, không chỉ là một dòng log.
+
+**Cần biết pod đang chạy config nào.** Nên xuất một metric thời điểm reload thành công gần nhất và ghi hash của config vào log mỗi lần nạp, để đối chiếu khi các pod lệch nhau.
+
+## Khi nào không nên hot reload
+
+Nếu mục tiêu chỉ là "đổi ConfigMap thì pod nhận config mới", có hai cách không phải viết dòng code nào:
+
+- **Đổi tên ConfigMap theo nội dung.** `configMapGenerator` của Kustomize gắn hash nội dung vào tên, nên mỗi lần đổi config là một lần rollout bình thường, có đủ rolling update và rollback.
+- **Restart tự động.** Annotation checksum trong Helm template hoặc controller như Reloader sẽ rollout lại Deployment khi ConfigMap đổi.
+
+Hot reload đáng công khi bạn cần đổi hành vi **mà không mất trạng thái trong bộ nhớ hay kết nối đang mở**: bật debug log trên đúng pod đang lỗi, tắt gấp một feature, chỉnh rate limit khi đang bị dồn tải.
+
+## Tóm tắt
+
+- Kubelet cập nhật ConfigMap bằng cách đổi symlink `..data`, nên phải watch thư mục cha chứ không watch file.
+- Cập nhật trễ tới khoảng một phút hoặc hơn, và các pod không đổi cùng lúc.
+- `subPath`, biến môi trường và ConfigMap immutable không được cập nhật.
+- Trong Go: nạp, kiểm tra, rồi đổi con trỏ bằng `atomic.Pointer`; config lỗi thì giữ bản cũ.
+- Chỉ hot reload những thứ thật sự cần đổi nhanh; phần còn lại để rollout lo.
+
+Tài liệu tham khảo: [ConfigMap trong tài liệu Kubernetes](https://kubernetes.io/docs/concepts/configuration/configmap/#mounted-configmaps-are-updated-automatically).

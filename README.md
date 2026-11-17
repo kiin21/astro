@@ -1,46 +1,59 @@
-# Astro Starter Kit: Basics
+# Blog
 
-```sh
-npm create astro@latest -- --template basics
-```
+Blog cá nhân dựng bằng Astro 7 trên theme [AstroPaper](https://github.com/satnaing/astro-paper) (giấy phép MIT, xem `LICENSE`).
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## Viết bài mới
 
-## 🚀 Project Structure
+1. Sao chép `src/content/posts/hello-world.mdx` và đổi tên. Tên file là đường dẫn của bài: `build-kv-db-p1.mdx` thành `/posts/build-kv-db-p1/`.
+2. Sửa frontmatter và nội dung.
+3. Đặt ảnh vào `src/assets/images/` và gọi bằng alias: `![mô tả](@/assets/images/ten-bai/anh.png)`.
+4. Chạy `pnpm dev` rồi mở `http://localhost:4321/astro`.
 
-Inside of your Astro project, you'll see the following folders and files:
+Thư mục con trong `src/content/posts/` trở thành một phần của đường dẫn. File hoặc thư mục bắt đầu bằng `_` bị bỏ qua.
 
-```text
-/
-├── public/
-│   └── favicon.svg
-├── src
-│   ├── assets
-│   │   └── astro.svg
-│   ├── components
-│   │   └── Welcome.astro
-│   ├── layouts
-│   │   └── Layout.astro
-│   └── pages
-│       └── index.astro
-└── package.json
-```
+## Frontmatter
 
-To learn more about the folder structure of an Astro project, refer to [our guide on project structure](https://docs.astro.build/en/basics/project-structure/).
+Schema khai báo trong `src/content.config.ts`. Sai hoặc thiếu trường bắt buộc thì build báo lỗi.
 
-## 🧞 Commands
+| Trường | Bắt buộc | Ghi chú |
+| :-- | :-- | :-- |
+| `title` | có | |
+| `description` | có | hiện ở danh sách bài và thẻ meta |
+| `pubDatetime` | có | ví dụ `2026-11-16T09:00:00+07:00`, không đặt trong ngoặc kép |
+| `modDatetime` | không | ngày cập nhật |
+| `tags` | không | mặc định `others` |
+| `featured` | không | `true` thì hiện ở mục Nổi bật trên trang chủ |
+| `draft` | không | `true` thì bài không được hiển thị |
+| `ogImage` | không | ảnh xem trước khi chia sẻ; bỏ trống thì tự sinh |
+| `hideToc` | không | ẩn mục lục của bài |
 
-All commands are run from the root of the project, from a terminal:
+Bài có `pubDatetime` ở tương lai không xuất hiện trong bản build cho tới ngày đó.
 
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
+## Cú pháp hỗ trợ
 
-## 👀 Want to learn more?
+- Toán (KaTeX): `$...$` trong dòng; công thức đứng riêng đặt giữa hai dòng `$$`.
+- Code block: thêm `file=ten-file.rs` để hiện tên file, `// [!code highlight]` để tô sáng dòng.
+- Callout kiểu GitHub: `> [!NOTE]`, `> [!TIP]`, `> [!WARNING]`.
+- MDX: khai báo hoặc `import` component rồi dùng trong bài.
 
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+## Cấu hình
+
+- `astro-paper.config.ts`: tên site, mô tả, tác giả, mạng xã hội, bật tắt tính năng.
+- `src/content/pages/about.md`: trang Giới thiệu.
+- `src/i18n/lang/vi.ts`: chữ trên giao diện.
+- `src/styles/theme.css`: màu sắc.
+
+## Lệnh
+
+| Lệnh | Tác dụng |
+| :-- | :-- |
+| `pnpm install` | Cài dependencies |
+| `pnpm dev` | Chạy dev server tại `localhost:4321/astro` |
+| `pnpm build` | Kiểm tra kiểu, build ra `./dist/` và tạo chỉ mục tìm kiếm |
+| `pnpm preview` | Xem thử bản build |
+
+Ô tìm kiếm chỉ có kết quả sau khi đã chạy `pnpm build` ít nhất một lần.
+
+## Deploy
+
+Push lên nhánh `master` thì workflow `.github/workflows/deploy.yml` tự build và đưa site lên GitHub Pages tại `https://kiin21.github.io/astro/`. Đường dẫn gốc `/astro` khai báo ở `base` trong `astro.config.ts`.

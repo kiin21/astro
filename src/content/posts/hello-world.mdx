@@ -1,0 +1,77 @@
+---
+title: "Bài mẫu: MDX, toán, ảnh và code"
+description: "Bài viết mẫu minh hoạ mọi thứ blog này hỗ trợ. Sao chép file này để bắt đầu bài mới."
+pubDatetime: 2026-11-16T09:00:00+07:00
+tags:
+  - meta
+  - astro
+featured: true
+draft: false
+---
+
+export const Key = ({ children }) => (
+  <kbd className="text-foreground border-border bg-muted rounded border px-1.5 py-0.5 text-sm">{children}</kbd>
+);
+
+Đây là bài mẫu. Mỗi bài là một file `.mdx` trong `src/content/posts/`; tên file là đường dẫn của bài.
+
+## Markdown cơ bản
+
+Viết **đậm**, *nghiêng*, `inline code` và [liên kết](https://docs.astro.build) như Markdown thường.
+
+> Trích dẫn dùng dấu `>` ở đầu dòng.
+
+| Cấu trúc | Ghi | Đọc |
+| --- | --- | --- |
+| B-tree | $O(\log n)$ | $O(\log n)$ |
+| LSM-tree | $O(1)$ amortized | $O(\log n)$ |
+
+## Công thức toán
+
+Công thức trong dòng dùng một dấu đô la: xác suất dương tính giả của Bloom filter là $p \approx (1 - e^{-kn/m})^k$.
+
+Công thức đứng riêng đặt giữa hai dòng `$$`:
+
+$$
+k_{\text{opt}} = \frac{m}{n} \ln 2
+\qquad
+\text{WA} = \frac{\text{bytes written to disk}}{\text{bytes written by user}}
+$$
+
+## Code
+
+Thêm `file=...` sau tên ngôn ngữ để hiện tên file. Chú thích `// [!code highlight]` tô sáng một dòng.
+
+```rust file=memtable.rs
+use std::collections::BTreeMap;
+
+pub struct MemTable {
+    entries: BTreeMap<Vec<u8>, Vec<u8>>,
+    size_bytes: usize,
+}
+
+impl MemTable {
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        self.size_bytes += key.len() + value.len(); // [!code highlight]
+        self.entries.insert(key, value);
+    }
+}
+```
+
+## Ảnh
+
+Đặt ảnh trong `src/assets/images/` và gọi bằng alias `@/`. Astro tự tối ưu ảnh PNG và JPG khi build.
+
+![Sơ đồ đường ghi của LSM-tree: Write, WAL, MemTable, flush xuống SSTable L0, compact sang L1.](@/assets/images/hello-world/lsm-tree.svg)
+
+## Callout
+
+> [!NOTE]
+> Callout viết theo cú pháp của GitHub. Các loại hay dùng: `NOTE`, `TIP`, `WARNING`, `CAUTION`.
+
+> [!WARNING] Lưu ý với MDX
+> Trong MDX, dấu `{` và `<` là cú pháp JSX. Muốn viết nguyên văn thì đặt trong `inline code` hoặc code block.
+
+## Component trong MDX
+
+Vì là MDX, bài viết có thể khai báo hoặc `import` component rồi dùng ngay trong nội dung: nhấn <Key>Ctrl</Key> + <Key>K</Key> để tìm kiếm.

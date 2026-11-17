@@ -1,0 +1,22 @@
+---
+// Rendered in <head> on every page, after the theme's own tags. Add
+// your own tags here: analytics, site verification, extra <meta> or
+// <link>, stylesheets. This file is yours: AstroPaper never changes it
+// after release.
+import "katex/dist/katex.min.css";
+
+type Props = {
+  title: string;
+  description: string;
+};
+---
+
+<style is:global>
+  /* Block equations otherwise keep the Typography default colour, which is
+     hard to read in dark mode. */
+  .app-prose .katex-display {
+    color: var(--foreground);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+</style>
